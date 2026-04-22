@@ -345,27 +345,38 @@ fn convert_paths_for_shell<'a, I>(paths: I, shell_type: &ShellType) -> Vec<Strin
 where
     I: IntoIterator<Item = &'a PathBuf>,
 {
-    paths
-        .into_iter()
-        .map(|path| convert_path_for_shell(path.as_path(), shell_type))
-        .collect()
+    let windows_posix_shell = is_windows_posix_shell(shell_type);
+
+    convert_paths(paths, windows_posix_shell)
 }
 
 fn join_paths_for_shell<'a, I>(paths: I, shell_type: &ShellType) -> miette::Result<OsString>
 where
     I: IntoIterator<Item = &'a PathBuf>,
 {
-    if is_windows_posix_shell(shell_type) {
+    let windows_posix_shell = is_windows_posix_shell(shell_type);
+
+    if windows_posix_shell {
         return Ok(OsString::from(
-            convert_paths_for_shell(paths, shell_type).join(":"),
+            convert_paths(paths, windows_posix_shell).join(":"),
         ));
     }
 
     env::join_paths(paths).into_diagnostic()
 }
 
-fn convert_path_for_shell(path: &Path, shell_type: &ShellType) -> String {
-    if is_windows_posix_shell(shell_type) {
+fn convert_paths<'a, I>(paths: I, windows_posix_shell: bool) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a PathBuf>,
+{
+    paths
+        .into_iter()
+        .map(|path| convert_path_for_shell(path.as_path(), windows_posix_shell))
+        .collect()
+}
+
+fn convert_path_for_shell(path: &Path, windows_posix_shell: bool) -> String {
+    if windows_posix_shell {
         return windows_path_to_posix(path).into_owned();
     }
 
@@ -705,17 +716,41 @@ mod tests {
         fn detects_emulated_posix_shells() {
             use std::env;
 
-            let original = env::var("MSYSTEM").ok();
-            env::set_var("MSYSTEM", "MINGW64");
+            struct EnvVarGuard {
+                key: &'static str,
+                original: Option<String>,
+            }
+
+            impl EnvVarGuard {
+                fn set(key: &'static str, value: &str) -> Self {
+                    let original = env::var(key).ok();
+
+                    unsafe {
+                        env::set_var(key, value);
+                    }
+
+                    Self { key, original }
+                }
+            }
+
+            impl Drop for EnvVarGuard {
+                fn drop(&mut self) {
+                    if let Some(value) = &self.original {
+                        unsafe {
+                            env::set_var(self.key, value);
+                        }
+                    } else {
+                        unsafe {
+                            env::remove_var(self.key);
+                        }
+                    }
+                }
+            }
+
+            let _guard = EnvVarGuard::set("MSYSTEM", "MINGW64");
 
             assert!(is_windows_posix_shell(&ShellType::Bash));
             assert!(!is_windows_posix_shell(&ShellType::Cmd));
-
-            if let Some(value) = original {
-                env::set_var("MSYSTEM", value);
-            } else {
-                env::remove_var("MSYSTEM");
-            }
         }
     }
 }
